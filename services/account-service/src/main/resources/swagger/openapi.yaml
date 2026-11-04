@@ -1,0 +1,423 @@
+openapi: 3.0.3
+info:
+  title: LedgerFlow Account Service API
+  version: 1.0.0
+  description: |
+    Ledger flow Aplication service responsible for managing user accounts and money
+  contact:
+    name: LedgerFlow
+tags:
+  - name: Accounts
+    description: Account opening and lookup
+  - name: Deposits
+    description: Money entering an account
+paths:
+  /accounts:
+    post:
+      tags:
+        - Accounts
+      operationId: openAccount
+      summary: Open an account
+      description: Opens an ACTIVE account with balance 0.00 for the given owner and document.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenAccountRequest'
+            example:
+              ownerName: Ana Souza
+              document: '52998224725'
+              email: 'ana@email.com'
+      responses:
+        '201':
+          description: Account opened
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+              example:
+                id: 1
+                ownerName: Ana Souza
+                document: '52998224725'
+                balance: 0.00
+                status: ACTIVE
+                createdAt: '2026-10-27T14:30:00Z'
+                updatedAt: '2026-10-27T14:30:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: An account with this document already exists
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+              example:
+                type: https://ledgerflow.dev/problems/document-already-registered
+                title: Document already registered
+                status: 409
+                detail: An account with document 52998224725 already exists.
+                instance: /accounts
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /accounts/{accountId}:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    get:
+      tags:
+        - Accounts
+      operationId: getAccount
+      summary: Get an account and its balance
+      description: |
+        Returns the account with its current balance. The transfer-service calls this
+        operation to check that the source and target accounts exist before a transfer.
+      responses:
+        '200':
+          description: Account found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+              example:
+                id: 1
+                ownerName: Ana Souza
+                document: '52998224725'
+                balance: 200.00
+                status: ACTIVE
+                createdAt: '2026-10-27T14:30:00Z'
+                updatedAt: '2026-10-27T15:10:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /accounts/{accountId}/deposits:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags:
+        - Deposits
+      operationId: depositIntoAccount
+      summary: Deposit into an account
+      description: |
+        Adds the amount to the balance and writes a DEPOSIT entry to the ledger in the same
+        transaction. Concurrent deposits on the same account are protected by optimistic
+        locking (ACCOUNTS.VERSION): the service retries on conflict, so ten simultaneous
+        deposits always end with the exact balance. A 409 is returned only when the retries
+        are exhausted, and the client may safely send the request again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DepositRequest'
+            example:
+              amount: 200.00
+      responses:
+        '201':
+          description: Deposit recorded. Returns the ledger entry created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountEntry'
+              example:
+                id: 10
+                accountId: 1
+                type: DEPOSIT
+                amount: 200.00
+                balanceAfter: 200.00
+                transferId: null
+                createdAt: '2026-10-27T15:10:00Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '409':
+          description: Concurrent update on the account, retries exhausted
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+              example:
+                type: https://ledgerflow.dev/problems/concurrent-update
+                title: Concurrent update
+                status: 409
+                detail: The account was updated concurrently. Try again.
+                instance: /accounts/1/deposits
+        '422':
+          description: The account is not ACTIVE and cannot receive deposits
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+              example:
+                type: https://ledgerflow.dev/problems/account-not-active
+                title: Account not active
+                status: 422
+                detail: Account 1 is BLOCKED.
+                instance: /accounts/1/deposits
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Validated by the api-gateway from stage 7. The account-service does not validate
+        the token itself; direct calls on port 8081 are for local development only.
+
+  parameters:
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      description: Account identifier
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+      example: 1
+
+  schemas:
+    OpenAccountRequest:
+      type: object
+      required:
+        - ownerName
+        - document
+      properties:
+        ownerName:
+          type: string
+          minLength: 1
+          maxLength: 150
+          description: Full name of the account owner
+          example: Ana Souza
+        document:
+          type: string
+          pattern: '^[0-9]{11}$'
+          description: CPF with 11 digits, no dots or dash. Unique across accounts.
+          example: '52998224725'
+
+    DepositRequest:
+      type: object
+      required:
+        - amount
+      properties:
+        amount:
+          $ref: '#/components/schemas/PositiveAmount'
+
+    Account:
+      type: object
+      required:
+        - id
+        - ownerName
+        - document
+        - balance
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 1
+        ownerName:
+          type: string
+          example: Ana Souza
+        document:
+          type: string
+          description: CPF with 11 digits
+          example: '52998224725'
+        balance:
+          $ref: '#/components/schemas/Balance'
+        status:
+          $ref: '#/components/schemas/AccountStatus'
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-10-27T14:30:00Z'
+        updatedAt:
+          type: string
+          format: date-time
+          example: '2026-10-27T15:10:00Z'
+
+    AccountStatus:
+      type: string
+      description: |
+        ACTIVE accounts receive deposits and take part in transfers.
+        BLOCKED and CLOSED accounts reject any movement.
+      enum:
+        - ACTIVE
+        - BLOCKED
+        - CLOSED
+
+    AccountEntry:
+      type: object
+      description: One line of the immutable ledger (ACCOUNT_ENTRIES). Never updated or deleted.
+      required:
+        - id
+        - accountId
+        - type
+        - amount
+        - balanceAfter
+        - createdAt
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 10
+        accountId:
+          type: integer
+          format: int64
+          example: 1
+        type:
+          $ref: '#/components/schemas/EntryType'
+        amount:
+          $ref: '#/components/schemas/PositiveAmount'
+        balanceAfter:
+          $ref: '#/components/schemas/Balance'
+        transferId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Transfer that caused the entry. Null for deposits.
+          example: null
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-10-27T15:10:00Z'
+
+    EntryType:
+      type: string
+      description: |
+        DEPOSIT comes from this API. DEBIT and CREDIT come from transfer events.
+      enum:
+        - DEPOSIT
+        - DEBIT
+        - CREDIT
+
+    PositiveAmount:
+      type: number
+      description: Exact decimal with scale 2, greater than zero. Mapped to BigDecimal.
+      minimum: 0.01
+      example: 50.00
+
+    Balance:
+      type: number
+      description: Exact decimal with scale 2, never negative. Mapped to BigDecimal.
+      minimum: 0
+      example: 200.00
+
+    ProblemDetail:
+      type: object
+      description: RFC 9457 Problem Details
+      required:
+        - type
+        - title
+        - status
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI that identifies the problem type
+          example: https://ledgerflow.dev/problems/validation-error
+        title:
+          type: string
+          description: Short, human readable summary of the problem type
+          example: Validation error
+        status:
+          type: integer
+          format: int32
+          description: HTTP status code
+          example: 400
+        detail:
+          type: string
+          description: Explanation specific to this occurrence
+          example: The request has invalid fields.
+        instance:
+          type: string
+          format: uri-reference
+          description: URI of this occurrence
+          example: /accounts
+        errors:
+          type: array
+          description: Field level errors, present only on validation errors
+          items:
+            $ref: '#/components/schemas/FieldError'
+
+    FieldError:
+      type: object
+      required:
+        - field
+        - message
+      properties:
+        field:
+          type: string
+          example: document
+        message:
+          type: string
+          example: must match "^[0-9]{11}$"
+
+  responses:
+    ValidationError:
+      description: Invalid request (missing field, wrong format, amount not positive)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://ledgerflow.dev/problems/validation-error
+            title: Validation error
+            status: 400
+            detail: The request has invalid fields.
+            instance: /accounts/1/deposits
+            errors:
+              - field: amount
+                message: must be greater than or equal to 0.01
+
+    Unauthorized:
+      description: Missing or invalid JWT (returned by the api-gateway)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://ledgerflow.dev/problems/unauthorized
+            title: Unauthorized
+            status: 401
+            detail: A valid bearer token is required.
+
+    AccountNotFound:
+      description: Account not found
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://ledgerflow.dev/problems/account-not-found
+            title: Account not found
+            status: 404
+            detail: Account 99 does not exist.
+            instance: /accounts/99
+
+    InternalError:
+      description: Unexpected error
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: about:blank
+            title: Internal Server Error
+            status: 500
